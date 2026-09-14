@@ -1,0 +1,34 @@
+{
+  "name": "agy-terminal",
+  "version": "0.4.1",
+  "description": "Expose a real agy/Gemini MCP tool connected to the user-opened visible terminal. Auto-approves only scoped file-edit confirmations; shell, OAuth, and out-of-scope files are never auto-approved.",
+  "author": {
+    "name": "Martelost"
+  },
+  "license": "MIT",
+  "keywords": [
+    "agy",
+    "gemini",
+    "terminal",
+    "review",
+    "auto-approve"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "AGY Terminal",
+    "shortDescription": "Delegate bounded work to local AGY/Gemini (v0.4.1)",
+    "longDescription": "Routes agy_run calls to the AGY terminal the user opened in the project directory. Per-cwd session routing ensures Project A never receives Project B's tasks. Call agy_status first to verify both ready: true and a nonzero agyPid. agy_run accepts task, mode, cwd, editableFiles, and timeoutSeconds (target parameter must be omitted). File-edit confirmations within editableFiles are auto-approved; shell commands, OAuth, and out-of-scope writes are always blocked.",
+    "developerName": "Martelost",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Analysis",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Check AGY session status with agy_status first (requires ready: true and nonzero agyPid).",
+      "Use AGY for a read-only review: agy_run({ task: '...', mode: 'review', cwd: '...' }).",
+      "Use AGY to implement a bounded change: agy_run({ task: '...', mode: 'worker', cwd: '...', editableFiles: [...], timeoutSeconds: 900 })."
+    ]
+  }
+}

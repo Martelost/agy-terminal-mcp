@@ -1,0 +1,24 @@
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+
+# Local agent/client state
+.codex/
+.gemini/
+.cache/
+codex-agy-sessions*
+*.log
+
+# Dependencies and generated output
+node_modules/
+coverage/
+dist/
+tmp/
+temp/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
