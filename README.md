@@ -58,6 +58,10 @@ node tests/agy-terminal/pipe-integration.test.mjs
 node --check plugin/mcp/server.mjs
 ```
 
+## GitHub security automation
+
+The public repository uses GitHub's free security features: secret scanning and push protection are enabled, CodeQL runs on pushes and pull requests through `.github/workflows/codeql.yml`, and Dependabot checks the GitHub Actions used by the workflow.
+
 PowerShell syntax can be checked without changing execution policy permanently:
 
 ```powershell
