@@ -4,16 +4,23 @@
 # Usage:
 #   .\tools\agy-terminal-install.ps1          # Install plugin globally
 #   .\tools\agy-terminal-install.ps1 -Check   # Doctor: verify installation & MCP version
+#   .\tools\agy-terminal-install.ps1 -RepairLauncher # Install and back up an unsigned conflicting shim
 #
 [CmdletBinding()]
 param(
     # When set, only check the installation state without changing anything.
-    [switch]$Check
+    [switch]$Check,
+    # Explicitly back up the unsigned .codex\bin\agy.exe that shadows agy.cmd.
+    [switch]$RepairLauncher
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Check -and $RepairLauncher) {
+    throw '-Check is read-only and cannot be combined with -RepairLauncher.'
+}
+. (Join-Path $PSScriptRoot 'agy-launcher-common.ps1')
 
-$PLUGIN_VERSION   = '0.4.1'
+$PLUGIN_VERSION   = '0.5.0'
 $PLUGIN_NAME      = 'agy-terminal'
 $PLUGIN_NAMESPACE = 'agy-terminal-mcp'
 $SCRIPT_DIR       = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -23,7 +30,16 @@ $PLUGIN_CACHE_DIR = Join-Path $env:USERPROFILE ".codex\plugins\cache\$PLUGIN_NAM
 $AGY_BIN_DIR      = Join-Path $env:USERPROFILE '.codex\bin'
 $LAUNCHER_SOURCE  = Join-Path $SCRIPT_DIR 'agy-auto.ps1'
 $LAUNCHER_TARGET  = Join-Path $AGY_BIN_DIR 'agy-auto.ps1'
+$COMMON_SOURCE    = Join-Path $SCRIPT_DIR 'agy-launcher-common.ps1'
+$COMMON_TARGET    = Join-Path $AGY_BIN_DIR 'agy-launcher-common.ps1'
+$CMD_SOURCE       = Join-Path $SCRIPT_DIR 'agy-auto.cmd'
+$CMD_TARGET       = Join-Path $AGY_BIN_DIR 'agy.cmd'
 $SESSION_REGISTRY = Join-Path $env:TEMP 'codex-agy-sessions.json'
+$INSPECT_CACHE_DIR = $PLUGIN_CACHE_DIR
+$bridgeLauncher = Get-AgyBridgeLauncher
+if ($Check -and $bridgeLauncher) {
+    $INSPECT_CACHE_DIR = Split-Path -Parent (Split-Path -Parent $bridgeLauncher)
+}
 
 $ok = $true
 
@@ -37,18 +53,39 @@ Write-Host "AGY Terminal Plugin  v$PLUGIN_VERSION  --  $(if ($Check) { 'Doctor' 
 Write-Host '--------------------------------------------------------------------' -ForegroundColor DarkGray
 Write-Host ''
 
-# -- Check 1: agy.exe ----------------------------------------------------------
+# -- Check 1: Real CLI and Node.js --------------------------------------------
 
-Write-Host '1. agy.exe'
-$agyCommand = Get-Command agy -ErrorAction SilentlyContinue
-$agyPath = if ($agyCommand) { $agyCommand.Source } else { $null }
-if (-not $agyPath) {
-    $agyPath = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
-}
-if (Test-Path -LiteralPath $agyPath -PathType Leaf) {
-    Write-OK "Found at '$agyPath'"
+Write-Host '1. Real AGY executable and Node.js'
+$agyPath = Get-AgyExecutable -WrapperDirectory $AGY_BIN_DIR
+if ($agyPath) {
+    Write-OK "Real AGY found at '$agyPath'"
+    try {
+        $signature = Get-AuthenticodeSignature -LiteralPath $agyPath
+        Write-INFO "Authenticode signature: $($signature.Status)"
+        if ($signature.SignerCertificate) {
+            Write-INFO "Signer: $($signature.SignerCertificate.Subject)"
+        }
+    } catch {
+        Write-INFO "Signature could not be read: $($_.Exception.Message)"
+    }
 } else {
-    Write-FAIL "agy.exe not found at '$agyPath' or on PATH. Install AGY first."
+    Write-FAIL 'Real AGY executable not found. Launcher scripts and .codex\bin shims do not count as the CLI.'
+}
+$nodeCommand = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($nodeCommand) {
+    try {
+        $nodeVersion = & $nodeCommand.Source --version
+        if ($LASTEXITCODE -ne 0 -or "$nodeVersion" -notmatch '^v(\d+)\.') {
+            throw 'Could not read the Node.js version.'
+        }
+        if ([int]$Matches[1] -lt 18) {
+            Write-FAIL "Node.js $nodeVersion is too old; version 18 or newer is required."
+        } else {
+            Write-OK "Node.js $nodeVersion at '$($nodeCommand.Source)'"
+        }
+    } catch { Write-FAIL "Node.js check failed: $($_.Exception.Message)" }
+} else {
+    Write-FAIL 'Node.js not found on PATH; version 18 or newer is required.'
 }
 
 # -- Check 2: Skill roots ------------------------------------------------------
@@ -62,6 +99,8 @@ $skillRoots = @(
 foreach ($root in $skillRoots) {
     if (Test-Path -LiteralPath $root -PathType Container) {
         Write-OK "'$root'"
+    } elseif (-not $Check -and $root -eq (Join-Path $env:USERPROFILE '.codex\plugins\cache')) {
+        Write-INFO "'$root' will be created during installation."
     } else {
         Write-WARN "'$root' does not exist -- some skills may not load."
     }
@@ -81,12 +120,12 @@ if (Test-Path -LiteralPath $PLUGIN_SOURCE -PathType Container) {
 
 Write-Host ''
 Write-Host '4. Installed plugin version'
-$installedPluginJson = Join-Path $PLUGIN_CACHE_DIR '.codex-plugin\plugin.json'
+$installedPluginJson = Join-Path $INSPECT_CACHE_DIR '.codex-plugin\plugin.json'
 if (Test-Path -LiteralPath $installedPluginJson -PathType Leaf) {
     try {
         $installed = Get-Content -LiteralPath $installedPluginJson -Raw | ConvertFrom-Json
         if ($installed.version -eq $PLUGIN_VERSION) {
-            Write-OK "v$($installed.version) at '$PLUGIN_CACHE_DIR'"
+            Write-OK "v$($installed.version) at '$INSPECT_CACHE_DIR'"
         } else {
             if ($Check) {
                 Write-WARN "Installed version v$($installed.version) does not match expected v$PLUGIN_VERSION"
@@ -99,7 +138,7 @@ if (Test-Path -LiteralPath $installedPluginJson -PathType Leaf) {
     }
 } else {
     if ($Check) {
-        Write-WARN "Plugin not installed at '$PLUGIN_CACHE_DIR'. Run without -Check to install."
+        Write-WARN "Plugin not installed at '$INSPECT_CACHE_DIR'. Run without -Check to install."
     } else {
         Write-INFO 'Not yet installed -- will install now.'
     }
@@ -109,7 +148,7 @@ if (Test-Path -LiteralPath $installedPluginJson -PathType Leaf) {
 
 Write-Host ''
 Write-Host '5. MCP server.mjs version'
-$serverMjs = Join-Path $PLUGIN_CACHE_DIR 'mcp\server.mjs'
+$serverMjs = Join-Path $INSPECT_CACHE_DIR 'mcp\server.mjs'
 if (Test-Path -LiteralPath $serverMjs -PathType Leaf) {
     $versionLine = (Get-Content -LiteralPath $serverMjs | Select-String "SERVER_VERSION\s*=\s*'([^']+)'") | Select-Object -First 1
     if ($versionLine) {
@@ -137,29 +176,60 @@ if (Test-Path -LiteralPath $serverMjs -PathType Leaf) {
 # -- Check 6: Launcher in codex bin --------------------------------------------
 
 Write-Host ''
-Write-Host '6. agy launcher in bin directory'
-if (Test-Path -LiteralPath $LAUNCHER_TARGET -PathType Leaf) {
-    if (Test-Path -LiteralPath $LAUNCHER_SOURCE -PathType Leaf) {
-        $srcHash = (Get-FileHash -LiteralPath $LAUNCHER_SOURCE -Algorithm SHA256).Hash
-        $dstHash = (Get-FileHash -LiteralPath $LAUNCHER_TARGET -Algorithm SHA256).Hash
+Write-Host '6. agy launcher files and command resolution'
+foreach ($launcherFile in @(
+    @{ Source = $LAUNCHER_SOURCE; Target = $LAUNCHER_TARGET },
+    @{ Source = $COMMON_SOURCE; Target = $COMMON_TARGET },
+    @{ Source = $CMD_SOURCE; Target = $CMD_TARGET }
+)) {
+    $source = $launcherFile.Source
+    $target = $launcherFile.Target
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        Write-FAIL "Launcher source not found at '$source'."
+    } elseif (Test-Path -LiteralPath $target -PathType Leaf) {
+        $srcHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        $dstHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
         if ($srcHash -eq $dstHash) {
-            Write-OK "Launcher at '$LAUNCHER_TARGET' is synchronized with repository source."
+            Write-OK "'$target' is synchronized with repository source."
+        } elseif ($Check) {
+            Write-WARN "'$target' differs from '$source'. Run without -Check to update."
         } else {
-            if ($Check) {
-                Write-WARN "Launcher at '$LAUNCHER_TARGET' differs from '$LAUNCHER_SOURCE'. Run without -Check to update."
-            } else {
-                Write-INFO "Launcher differs from repository source and will be updated."
-            }
+            Write-INFO "'$target' will be updated."
         }
+    } elseif ($Check) {
+        Write-WARN "Launcher file not found at '$target'. Run without -Check to install."
     } else {
-        Write-OK "Launcher found at '$LAUNCHER_TARGET'"
+        Write-INFO "'$target' will be installed."
     }
-} else {
-    if ($Check) {
-        Write-WARN "Launcher not found at '$LAUNCHER_TARGET'. Run without -Check to install."
+}
+$shimPath = Join-Path $AGY_BIN_DIR 'agy.exe'
+if (Test-Path -LiteralPath $shimPath -PathType Leaf) {
+    if ($RepairLauncher) {
+        Write-INFO "The conflicting '$shimPath' will be checked and backed up."
     } else {
-        Write-INFO 'Launcher not yet installed in bin directory.'
+        Write-WARN "'$shimPath' shadows agy.cmd and may be blocked by Device Guard."
+        Write-INFO 'Use -RepairLauncher to back up an unsigned shim, or explicitly run the full path to agy.cmd.'
     }
+}
+$agyCommands = @(Get-Command agy -All -ErrorAction SilentlyContinue)
+foreach ($command in $agyCommands) {
+    Write-INFO "agy resolves to: $($command.CommandType) $($command.Definition)"
+}
+$pathDirectories = @($env:PATH -split ';' | ForEach-Object {
+    [Environment]::ExpandEnvironmentVariables($_.Trim().Trim('"')).TrimEnd('\', '/')
+})
+if ($AGY_BIN_DIR.TrimEnd('\', '/') -notin $pathDirectories) {
+    Write-WARN "'$AGY_BIN_DIR' is missing from PATH. Add it before the real AGY directory and open a new terminal."
+} elseif ($agyCommands.Count -gt 0 -and
+          $agyCommands[0].Source -ne $CMD_TARGET -and
+          -not ($RepairLauncher -and $agyCommands[0].Source -eq $shimPath) -and
+          ($Check -or (Test-Path -LiteralPath $CMD_TARGET -PathType Leaf))) {
+    Write-WARN 'Another command takes precedence over the bridge wrapper. Use the full path to .codex\bin\agy.cmd or correct PATH/profile precedence.'
+}
+if ($bridgeLauncher) {
+    Write-INFO "Discovered bridge: '$bridgeLauncher'"
+} elseif ($Check) {
+    Write-WARN 'No complete bridge installation was found in either supported plugin cache.'
 }
 
 # -- Check 7: Active sessions --------------------------------------------------
@@ -173,14 +243,15 @@ if (Test-Path -LiteralPath $SESSION_REGISTRY -PathType Leaf) {
         if ($sessions -isnot [array]) { $sessions = @($sessions) }
         $liveSessions = @($sessions | Where-Object {
             $bPid = if ($_.bridgePid) { [int]$_.bridgePid } else { [int]$_.pid }
-            try { Get-Process -Id $bPid -ErrorAction Stop; $true } catch { $false }
+            try { Get-Process -Id $bPid -ErrorAction Stop | Out-Null; $true } catch { $false }
         })
         if ($liveSessions.Count -gt 0) {
             foreach ($s in $liveSessions) {
                 $aPid = if ($s.agyPid) { [int]$s.agyPid } else { 0 }
-                $agyAlive = if ($aPid -gt 0) { try { Get-Process -Id $aPid -ErrorAction Stop; $true } catch { $false } } else { $false }
+                $agyAlive = if ($aPid -gt 0) { try { Get-Process -Id $aPid -ErrorAction Stop | Out-Null; $true } catch { $false } } else { $false }
                 $stateLabel = if ($agyAlive) { "READY (agyPid: $aPid)" } else { "BRIDGE ONLY (agyPid: 0)" }
-                Write-OK "session $($s.sessionId) | cwd: $($s.cwd) | pipe: $($s.pipeName) | bridgePid: $($s.bridgePid) | $stateLabel | v$($s.pluginVersion)"
+                $sessionMessage = "session $($s.sessionId) | cwd: $($s.cwd) | pipe: $($s.pipeName) | bridgePid: $($s.bridgePid) | $stateLabel | v$($s.pluginVersion)"
+                if ($agyAlive) { Write-OK $sessionMessage } else { Write-INFO "$sessionMessage | Open agy in this project terminal." }
             }
         } else {
             Write-INFO 'No live AGY sessions. Run "agy" in a project terminal to create one.'
@@ -204,13 +275,36 @@ if (-not $Check) {
     }
 
     # Create destination
+    foreach ($source in @($LAUNCHER_SOURCE, $COMMON_SOURCE, $CMD_SOURCE)) {
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            Write-FAIL "Cannot install: launcher source not found at '$source'."
+            exit 1
+        }
+    }
+    if ($RepairLauncher) {
+        if (-not $agyPath) {
+            Write-FAIL 'Cannot repair the launcher without a separate real AGY installation. Install AGY first.'
+            exit 1
+        }
+        try {
+            $backupPath = Backup-AgyLauncherShim
+            if ($backupPath) {
+                Write-OK "Unsigned shim backed up at '$backupPath'. Rename it to agy.exe to restore."
+            } else {
+                Write-INFO 'No conflicting agy.exe shim needs repair.'
+            }
+        } catch {
+            Write-FAIL $_.Exception.Message
+            exit 1
+        }
+    }
     if (-not (Test-Path -LiteralPath $PLUGIN_CACHE_DIR -PathType Container)) {
         New-Item -ItemType Directory -Path $PLUGIN_CACHE_DIR -Force | Out-Null
         Write-INFO "Created '$PLUGIN_CACHE_DIR'"
     }
 
     # Copy files (overwrite)
-    $items = Get-ChildItem -LiteralPath $PLUGIN_SOURCE -Recurse
+    $items = Get-ChildItem -LiteralPath $PLUGIN_SOURCE -Recurse -Force
     foreach ($item in $items) {
         $relative  = $item.FullName.Substring($PLUGIN_SOURCE.Length).TrimStart('\','/')
         $dest      = Join-Path $PLUGIN_CACHE_DIR $relative
@@ -233,14 +327,13 @@ if (-not $Check) {
             New-Item -ItemType Directory -Path $AGY_BIN_DIR -Force | Out-Null
         }
         Copy-Item -LiteralPath $LAUNCHER_SOURCE -Destination $LAUNCHER_TARGET -Force
+        Copy-Item -LiteralPath $COMMON_SOURCE -Destination $COMMON_TARGET -Force
         Write-OK "agy launcher updated at '$LAUNCHER_TARGET'"
 
         # Also copy agy-auto.cmd to agy.cmd if present in script dir
-        $cmdSource = Join-Path $SCRIPT_DIR 'agy-auto.cmd'
-        $cmdTarget = Join-Path $AGY_BIN_DIR 'agy.cmd'
-        if (Test-Path -LiteralPath $cmdSource -PathType Leaf) {
-            Copy-Item -LiteralPath $cmdSource -Destination $cmdTarget -Force
-            Write-OK "agy command wrapper updated at '$cmdTarget'"
+        if (Test-Path -LiteralPath $CMD_SOURCE -PathType Leaf) {
+            Copy-Item -LiteralPath $CMD_SOURCE -Destination $CMD_TARGET -Force
+            Write-OK "agy command wrapper updated at '$CMD_TARGET'"
         }
     } else {
         Write-WARN "Launcher source not found at '$LAUNCHER_SOURCE'"
@@ -249,18 +342,18 @@ if (-not $Check) {
     Write-Host ''
     Write-Host '--- Post-install steps ----------------------------------------------' -ForegroundColor DarkGray
     Write-Host '  1. Restart Claude / Codex to reload the MCP process.' -ForegroundColor Yellow
-    Write-Host '  2. Open a terminal in your project and run: agy' -ForegroundColor Yellow
+    Write-Host '  2. Ask Codex to open AGY for your project, or run agy yourself.' -ForegroundColor Yellow
     Write-Host '  3. In Claude/Codex, call: agy_status({ cwd: "<project path>" })' -ForegroundColor Yellow
-    Write-Host '  4. Verify serverVersion reports 0.4.1 and agyReady is true.' -ForegroundColor Yellow
+    Write-Host "  4. Verify serverVersion reports $PLUGIN_VERSION and inputReady is true." -ForegroundColor Yellow
 }
 
 # -- Summary -------------------------------------------------------------------
 
 Write-Host ''
 if ($ok) {
-    Write-Host '✓ All checks passed.' -ForegroundColor Green
+    Write-Host '[OK] All checks passed.' -ForegroundColor Green
 } else {
-    Write-Host '⚠ Some checks failed -- see warnings above.' -ForegroundColor Yellow
+    Write-Host '[WARN] Some checks failed -- see warnings above.' -ForegroundColor Yellow
 }
 Write-Host ''
 

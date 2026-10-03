@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'agy-launcher-common.ps1')
 
 # ── Per-cwd pipe name (matches agy-terminal-bridge.ps1 v0.4.1) ───────────────
 function Get-PerCwdPipeName {
@@ -68,30 +69,11 @@ function Update-RegistryAgyPid {
     }
 }
 
-# Locate the bridge script from the newest installed plugin version
-$pluginRoot = Join-Path $env:USERPROFILE '.codex\plugins\cache\agy-terminal-mcp\agy-terminal'
-$bridgeLauncher = $null
-if (Test-Path -LiteralPath $pluginRoot -PathType Container) {
-    $newest = Get-ChildItem -LiteralPath $pluginRoot -Directory |
-              Where-Object { $_.Name -match '^\d+\.\d+\.\d+' } |
-              Sort-Object { try { [version]($_.Name -replace '[-+].*$','') } catch { [version]'0.0.0' } } -Descending |
-              Select-Object -First 1
-    if ($null -ne $newest) {
-        $candidate = Join-Path $newest.FullName 'mcp\agy-terminal-bridge.ps1'
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            $bridgeLauncher = $candidate
-        }
-    }
-}
-
-$realAgy = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
-if (-not (Test-Path -LiteralPath $realAgy -PathType Leaf)) {
-    $cmd = Get-Command agy.exe -ErrorAction SilentlyContinue
-    if ($cmd -and $cmd.Source -ne $MyInvocation.MyCommand.Path) {
-        $realAgy = $cmd.Source
-    } else {
-        throw "The real agy executable was not found at '$realAgy'."
-    }
+# Locate a complete bridge installation in either supported cache namespace.
+$bridgeLauncher = Get-AgyBridgeLauncher
+$realAgy = Get-AgyExecutable -WrapperDirectory $PSScriptRoot
+if (-not $realAgy) {
+    throw 'The real AGY executable was not found. Install AGY or add its executable directory to PATH; .codex\bin launcher shims are excluded.'
 }
 
 # Normalize incoming arguments safely so $null or empty elements don't cause binding issues
@@ -103,6 +85,9 @@ $isInfoFlag = ($nonEmptyArgs.Count -gt 0) -and
     (($nonEmptyArgs | Where-Object { $_ -notin @('--version', '-V', '--help', '-h') }).Count -eq 0)
 
 $startsInteractiveSession = -not $isInfoFlag
+if ($startsInteractiveSession -and $null -eq $bridgeLauncher) {
+    Write-Warning 'No AGY Terminal bridge installation was found. AGY will open, but MCP requests cannot reach it. Run the repository installer first.'
+}
 
 if ($startsInteractiveSession -and $null -ne $bridgeLauncher) {
     $cleanCwdName = ($currentCwd.ToLower() -replace '[^a-z0-9]','_')
@@ -114,9 +99,9 @@ if ($startsInteractiveSession -and $null -ne $bridgeLauncher) {
         if ($ownsMutex -and -not (Test-Path -LiteralPath $pipePath)) {
             Start-Process -FilePath 'powershell.exe' `
                 -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                                '-File', $bridgeLauncher, '-PipeName', $pipeName) `
+                                '-File', ('"{0}"' -f $bridgeLauncher), '-PipeName', ('"{0}"' -f $pipeName)) `
                 -WorkingDirectory $currentCwd `
-                -WindowStyle Normal | Out-Null
+                -WindowStyle Hidden | Out-Null
         }
     } finally {
         if ($ownsMutex) { $mutex.ReleaseMutex() }

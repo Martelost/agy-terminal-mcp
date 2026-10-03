@@ -18,6 +18,10 @@ param(
     [string] $PromptFile = '',
 
     [switch] $NoEnter,
+    # Capture the existing screen without writing even an Enter key.
+    [switch] $ReadOnly,
+    # Resume observing a task after a human handled a confirmation.
+    [switch] $ObserveOnly,
 
     # Marker written at the end of the prompt; when visible the script knows AGY finished.
     [string] $CompletionMarker,
@@ -173,7 +177,9 @@ public static class AgyVisibleInput
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool GetConsoleScreenBufferInfo(IntPtr h, out CSBI i);
     [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    static extern uint ReadConsoleOutputCharacterW(IntPtr h, StringBuilder b, uint l, Coord c, out uint r);
+    static extern bool ReadConsoleOutputCharacterW(IntPtr h,
+        [Out, MarshalAs(UnmanagedType.LPArray, ArraySubType=UnmanagedType.U2, SizeParamIndex=2)] char[] b,
+        uint l, Coord c, out uint r);
 
     static IR Key(char c, bool dn) {
         ushort vk = c=='\r'?(ushort)0x0D:c=='\n'?(ushort)0x0D:c=='\b'?(ushort)0x08:c=='\t'?(ushort)0x09:c=='\x1B'?(ushort)0x1B:(ushort)0;
@@ -204,11 +210,13 @@ public static class AgyVisibleInput
             short l=info.Win.L, t=info.Win.T, w=(short)(info.Win.R-l+1), ht=(short)(info.Win.B-t+1);
             var sb=new StringBuilder();
             for(short row=0;row<ht;row++){
-                var line=new StringBuilder(w); uint r;
+                var line=new char[w]; uint r;
                 var co=new Coord{X=l,Y=(short)(t+row)};
-                if(ReadConsoleOutputCharacterW(h,line,(uint)w,co,out r)==0)
+                if(!ReadConsoleOutputCharacterW(h,line,(uint)w,co,out r))
                     throw new Win32Exception(Marshal.GetLastWin32Error(),"ROCW failed");
-                sb.AppendLine(line.ToString().TrimEnd('\0',' '));
+                // Console output is counted text, not a NUL-terminated string.
+                // StringBuilder marshaling could append an uninitialized char.
+                sb.AppendLine(new string(line,0,(int)r).TrimEnd('\0',' '));
             }
             return sb.ToString();
         } finally { CloseHandle(h); FreeConsole(); }
@@ -217,6 +225,17 @@ public static class AgyVisibleInput
 '@
 
 Add-Type -TypeDefinition $source -Language CSharp
+
+if ($ReadOnly) {
+    $observation = [ordered]@{
+        status = 'observed'; sessionId = $SessionId; agyPid = $AgyPid
+        captured = [AgyVisibleInput]::Capture($ProcessId)
+    }
+    $json = $observation | ConvertTo-Json -Compress -Depth 5
+    if ($ResultFile) { Set-Content -LiteralPath $ResultFile -Value $json -Encoding UTF8 }
+    else { Write-Output $json }
+    exit 0
+}
 
 # ── Send the prompt ───────────────────────────────────────────────────────────
 
@@ -229,7 +248,7 @@ if ([string]::IsNullOrWhiteSpace($Text) -and -not [string]::IsNullOrWhiteSpace($
 # Flatten internal newlines so each newline does not prematurely submit the prompt
 $payload = ($Text -replace '\r?\n+', ' ').Trim()
 if (-not $NoEnter) { $payload += "`r" }
-[AgyVisibleInput]::Send($ProcessId, $payload)
+if (-not $ObserveOnly) { [AgyVisibleInput]::Send($ProcessId, $payload) }
 
 # ── Result state ──────────────────────────────────────────────────────────────
 
@@ -291,6 +310,7 @@ if (-not [string]::IsNullOrWhiteSpace($CompletionMarker)) {
     $captured              = ''
     $captureError          = ''
     $found                 = $false
+    $humanState            = ''
     $idleSamples           = 0
     $lastApprovalSignature = ''
     $lastApprovalAt        = (Get-Date).AddSeconds(-5)
@@ -298,16 +318,31 @@ if (-not [string]::IsNullOrWhiteSpace($CompletionMarker)) {
     while ((Get-Date) -lt $deadline) {
         try {
             $captured = [AgyVisibleInput]::Capture($ProcessId)
+            $activeTail = $captured.TrimEnd()
+            if ($activeTail.Length -gt 2000) { $activeTail = $activeTail.Substring($activeTail.Length - 2000) }
+            if ($activeTail -match '(?i)accounts\.google\.com|authorization\s+code|verification\s+code|(?:sign|log)\s*in\s+(?:with|to)|signing\s+in|not\s+signed\s+in|how would you like to authenticate|waiting for authentication') {
+                $humanState = 'auth_required'
+                $captured = '[Authentication screen hidden. Complete login yourself in the visible AGY window.]'
+                break
+            }
+            if (-not $AutoApprove -and $activeTail -match '(?i)(?:press|hit)\s+(?:the\s+)?enter(?!\s+to\s+(?:send|submit))|enter\s+to\s+(?:continue|confirm|accept)|\[y/n\]|\(y/n\)|do you trust|trust this (?:folder|workspace)|>\s*1\.\s*(?:yes|allow|approve)') {
+                $humanState = 'awaiting_user'
+                break
+            }
+
+            if ($activeTail -match $SURVEY_PATTERN) {
+                $humanState = 'awaiting_user'
+                break
+            }
 
             if ($AutoApprove) {
                 $tail = if ($captured.Length -gt 12000) { $captured.Substring($captured.Length - 12000) } else { $captured }
                 $promptArea = if ($tail.Length -gt 1500) { $tail.Substring($tail.Length - 1500) } else { $tail }
 
-                # Survey skip
+                # Surveys also belong to the user; never dismiss them automatically.
                 if ($promptArea -match $SURVEY_PATTERN) {
-                    [AgyVisibleInput]::Send($ProcessId, "0`r")
-                    Start-Sleep -Milliseconds 350
-                    continue
+                    $humanState = 'awaiting_user'
+                    break
                 }
 
                 $isNumbered = $promptArea -match $NUMBERED_PROMPT
@@ -318,6 +353,10 @@ if (-not [string]::IsNullOrWhiteSpace($CompletionMarker)) {
                     $hardBlocked = $false
                     foreach ($bp in $BLOCK_PATTERNS) {
                         if ($promptArea -match $bp) { $hardBlocked = $true; $result.blocked++; break }
+                    }
+                    if ($hardBlocked) {
+                        $humanState = 'awaiting_user'
+                        break
                     }
 
                     if (-not $hardBlocked) {
@@ -330,14 +369,28 @@ if (-not [string]::IsNullOrWhiteSpace($CompletionMarker)) {
                             # Path validation: check if any allowed file is mentioned in prompt
                             $pathOk = $false
                             $tailLower = $promptArea.ToLowerInvariant()
-                            foreach ($ne in $normalizedEditables) {
-                                if ($tailLower.Contains($ne) -or $tailLower.Contains([System.IO.Path]::GetFileName($ne))) {
-                                    $pathOk = $true
-                                    break
+                            # A basename match could approve a different project.
+                            # Require every quoted path, or one explicit absolute
+                            # path, to pass the same cwd/file/sensitive-name checks.
+                            $quotedPaths = @([regex]::Matches($promptArea, '["'']([^"'']+)["'']') |
+                                ForEach-Object { $_.Groups[1].Value })
+                            $pathsToCheck = $quotedPaths
+                            if ($pathsToCheck.Count -eq 0) {
+                                $pathsToCheck = @([regex]::Matches($promptArea, '[A-Za-z]:[\\/][^\s"'']+') |
+                                    ForEach-Object { $_.Value })
+                            }
+                            if ($pathsToCheck.Count -gt 0) {
+                                $pathOk = $true
+                                foreach ($rawPath in $pathsToCheck) {
+                                    $normPath = Get-NormalizedPath -Raw $rawPath -BaseCwd $Cwd
+                                    if (-not (Test-PathInScope -NPath $normPath -NCwd $normalizedCwd -NEditables $normalizedEditables)) {
+                                        $pathOk = $false
+                                        break
+                                    }
                                 }
                             }
 
-                            if (-not $pathOk) {
+                            if ($pathsToCheck.Count -eq 0 -and -not $pathOk) {
                                 $promptLines = ($promptArea -split '\r?\n') | Where-Object {
                                     $_ -match '(?i)allow|write|edit|modif|creat|apply|save|file'
                                 }
@@ -366,6 +419,8 @@ if (-not [string]::IsNullOrWhiteSpace($CompletionMarker)) {
                                 }
                             } else {
                                 $result.blocked++
+                                $humanState = 'awaiting_user'
+                                break
                             }
                         }
                     }
@@ -391,7 +446,10 @@ if (-not [string]::IsNullOrWhiteSpace($CompletionMarker)) {
     }
 
     $result.captured = $captured
-    $result.status   = if ($found) { 'completed' } else {
+    $result.status   = if ($humanState) {
+        $result.error = 'Human input is required in the visible AGY window. After handling it yourself, call agy_wait to continue observing this task.'
+        $humanState
+    } elseif ($found) { 'completed' } else {
         $authBlocked = ($captured -match '(?i)accounts\.google\.com|authorization\s+code|\boauth\b|verification\s+code|\blog\s*in\b|\blogin\b')
         if ($authBlocked) {
             $result.error = "Interactive authentication required in the AGY terminal. Please complete login / OAuth in the terminal window."
@@ -408,6 +466,10 @@ if (-not [string]::IsNullOrWhiteSpace($CompletionMarker)) {
             'capture_timeout'
         }
     }
+}
+
+if ($result.status -eq 'auth_required') {
+    $result.captured = '[Authentication screen hidden. Complete login yourself in the visible AGY window.]'
 }
 
 # ── Output ────────────────────────────────────────────────────────────────────

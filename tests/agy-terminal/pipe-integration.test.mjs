@@ -58,7 +58,7 @@ function pipeRequest(pipeName, payload, timeoutSeconds) {
     let settled = false;
     let buffer = '';
     const socket = net.createConnection(pipePath(pipeName));
-    const timer = setTimeout(() => resolve({
+    const timer = setTimeout(() => finish({
       status: 'bridge_timeout',
       error: `Timeout after ${timeoutSeconds}s`
     }), timeoutSeconds * 1000);
@@ -198,7 +198,7 @@ await test('pipeRequest: bridge_unavailable when server is closed', async () => 
 await test('pipeRequest: bridge_timeout when server hangs', async () => {
   const pipeName = 'CodexAgyTest_timeout_' + Date.now();
   // Server that never responds
-  const server = net.createServer(() => {}); // accept but never write
+  const server = net.createServer((socket) => socket.resume()); // read but never respond
   await new Promise((resolve, reject) => {
     server.listen(pipePath(pipeName), () => resolve());
     server.on('error', reject);

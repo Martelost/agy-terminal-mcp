@@ -1,5 +1,5 @@
 /**
- * agy-terminal MCP server  —  v0.4.1
+ * agy-terminal MCP server  —  v0.5.0
  *
  * Protocol: JSON-RPC 2.0 over stdio (MCP 2025-06-18)
  *
@@ -26,9 +26,10 @@ import process from 'node:process';
 import readline from 'node:readline';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { createSessionController } from './session-control.mjs';
 
 const SERVER_NAME = 'agy-terminal';
-const SERVER_VERSION = '0.4.1';
+const SERVER_VERSION = '0.5.0';
 const PROTOCOL_VERSION = '2025-06-18';
 const DEFAULT_TIMEOUT_SECONDS = 900;
 const DEFAULT_MAX_OUTPUT_CHARS = 30000;
@@ -36,6 +37,8 @@ const SERVER_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const VISIBLE_INPUT_SCRIPT = path.join(SERVER_DIRECTORY, 'agy-visible-input.ps1');
 const BRIDGE_SCRIPT = path.join(SERVER_DIRECTORY, 'agy-terminal-bridge.ps1');
 const SESSION_REGISTRY = path.join(os.tmpdir(), 'codex-agy-sessions.json');
+const OPEN_SCRIPT = path.join(SERVER_DIRECTORY, 'agy-open.ps1');
+const pendingTasks = new Map();
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -62,13 +65,13 @@ const agyStatusTool = {
 const agyRunTool = {
   name: 'agy_run',
   description: [
-    'Send a bounded task to the AGY terminal the user opened in the project directory.',
+    'Send a bounded task to the visible AGY terminal in the project directory.',
     'Requires calling agy_status first to verify both ready: true and agyReady: true with a nonzero agyPid.',
-    'In worker mode, auto-approves ONLY file-edit confirmations that are within editableFiles and cwd.',
+    'The user confirms operations by default. Explicit autoApprove:true in worker mode permits ONLY scoped file-edit confirmations.',
     'Shell commands, OAuth, login, delete, and out-of-scope files are never auto-approved.',
     'In review mode (default) AGY is read-only.',
     'Returns the captured AGY response, autoApproval count, blocked count, and session metadata.',
-    'Requires the user to have run "agy" in the project terminal first. Target parameter must be omitted.'
+    'Use agy_open to open a visible session and agy_read to inspect it first. Use agy_wait after a human handles a pending task confirmation. Target parameter must be omitted.'
   ].join(' '),
   inputSchema: {
     type: 'object',
@@ -159,6 +162,40 @@ const terminalRunTool = {
   }
 };
 
+const agyOpenTool = {
+  name: 'agy_open',
+  description: 'Open AGY yourself in a visible, user-interactive console for the authorized project. Reuse an existing session. Return the actual terminal screen and whether the user must handle a prompt. Never confirms prompts or logs in.',
+  inputSchema: {
+    type: 'object', additionalProperties: false,
+    properties: {
+      cwd: { type: 'string', description: 'Absolute project directory.' },
+      maxOutputChars: { type: 'integer', minimum: 1000, maximum: 100000 }
+    }
+  }
+};
+const agyReadTool = {
+  name: 'agy_read',
+  description: 'Read the visible AGY terminal for this project without typing or pressing Enter. Return screen text, inputReady, and manualInputRequired. Authentication screens are hidden; the user handles login.',
+  inputSchema: agyOpenTool.inputSchema
+};
+const agyWaitTool = {
+  name: 'agy_wait',
+  description: 'Continue observing a previously submitted task after the user handles a terminal confirmation. Does not resend the task or press Enter. Use agy_read to inspect the current screen.',
+  inputSchema: {
+    type: 'object', additionalProperties: false,
+    properties: {
+      cwd: { type: 'string', description: 'Absolute project directory.' },
+      timeoutSeconds: { type: 'integer', minimum: 15, maximum: 3600 },
+      maxOutputChars: { type: 'integer', minimum: 1000, maximum: 100000 }
+    }
+  }
+};
+agyRunTool.inputSchema.properties.autoApprove = {
+  type: 'boolean',
+  default: false,
+  description: 'Default false: the user confirms operations in the visible terminal. True explicitly enables only scoped file-edit approvals in worker mode.'
+};
+
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
 function send(message) {
@@ -188,6 +225,38 @@ function trimOutput(value, maxChars) {
   if (value.length <= maxChars) return value;
   return `${value.slice(0, maxChars)}\n...[truncated ${value.length - maxChars} chars]`;
 }
+
+// Small helper processes use a result file because AttachConsole changes console
+// handles. No AGY stdin/stdout is redirected; the user owns the visible console.
+async function powershellResult(script, args, timeoutMs = 15000) {
+  const resultFile = path.join(os.tmpdir(), 'codex-agy-observation-' + randomUUID() + '.json');
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn('powershell.exe', [
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+        ...args, '-ResultFile', resultFile
+      ], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      let error = '';
+      const timer = setTimeout(() => { child.kill(); reject(new Error('Console helper timed out.')); }, timeoutMs);
+      child.stderr.on('data', (chunk) => { error = (error + chunk.toString()).slice(-3000); });
+      child.once('error', (e) => { clearTimeout(timer); reject(e); });
+      child.once('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(error.trim() || 'Console helper exited with code ' + code));
+      });
+    });
+    return JSON.parse((await fs.readFile(resultFile, 'utf8')).replace(/^\uFEFF/, ''));
+  } finally { await fs.rm(resultFile, { force: true }).catch(() => {}); }
+}
+
+const sessionController = createSessionController({
+  findSession,
+  launch: (cwd) => powershellResult(OPEN_SCRIPT, ['-Cwd', cwd, '-PipeName', cwdPipeName(cwd)]),
+  capture: (session) => powershellResult(VISIBLE_INPUT_SCRIPT, [
+    '-ReadOnly', '-SessionId', session.sessionId, '-AgyPid', String(session.agyPid)
+  ])
+});
 
 // ── Session registry ──────────────────────────────────────────────────────────
 
@@ -324,17 +393,17 @@ const sessionQueues = new Map(); // pipeName → Promise (tail of queue chain)
 
 function enqueueForSession(pipeName, fn) {
   const prev = sessionQueues.get(pipeName) ?? Promise.resolve();
-  const next = prev.then(fn).catch(() => fn()); // always run fn even if prev threw
+  const next = prev.catch(() => {}).then(fn); // never execute a failed task twice
   sessionQueues.set(pipeName, next.catch(() => {}));
   return next;
 }
 
 // ── Visible terminal interaction ──────────────────────────────────────────────
 
-async function visibleTerminalRequest({ text, timeoutSeconds, autoApprove, sessionId, agyPid, cwd, editableFiles }) {
+async function visibleTerminalRequest({ text = '', timeoutSeconds, autoApprove, sessionId, agyPid, cwd, editableFiles, ticket, observeOnly = false }) {
   const token = randomUUID().replaceAll('-', '');
-  const beginMarker = `CODEX_AGY_RESULT_BEGIN_${token}`;
-  const endMarker = `CODEX_AGY_RESULT_END_${token}`;
+  const beginMarker = ticket.beginMarker;
+  const endMarker = ticket.endMarker;
   const resultFile = path.join(os.tmpdir(), `codex-agy-result-${process.pid}-${token}.json`);
   const promptFile = path.join(os.tmpdir(), `codex-agy-prompt-${process.pid}-${token}.txt`);
 
@@ -348,7 +417,7 @@ async function visibleTerminalRequest({ text, timeoutSeconds, autoApprove, sessi
     'Do not omit the end marker.'
   ].join('\n');
 
-  await fs.writeFile(promptFile, prompt, 'utf8');
+  if (!observeOnly) await fs.writeFile(promptFile, prompt, 'utf8');
 
   return new Promise((resolve) => {
     let settled = false;
@@ -360,11 +429,12 @@ async function visibleTerminalRequest({ text, timeoutSeconds, autoApprove, sessi
       '-NoProfile',
       '-ExecutionPolicy', 'Bypass',
       '-File', VISIBLE_INPUT_SCRIPT,
-      '-PromptFile', promptFile,
       '-CompletionMarker', endMarker,
       '-WaitSeconds', String(timeoutSeconds),
       '-ResultFile', resultFile
     ];
+    if (observeOnly) inputArgs.push('-ObserveOnly');
+    else inputArgs.push('-PromptFile', promptFile);
     if (sessionId) inputArgs.push('-SessionId', sessionId);
     if (agyPid) inputArgs.push('-AgyPid', String(agyPid));
     if (autoApprove) inputArgs.push('-AutoApprove');
@@ -434,6 +504,7 @@ async function visibleTerminalRequest({ text, timeoutSeconds, autoApprove, sessi
         : 'visible_terminal_error');
       finish({
         status: captureStatus === 'completed' ? 'completed_visible_terminal' : captureStatus,
+        submitted: !observeOnly,
         exitCode,
         output: captured ? extractAnswer(captured.captured) : senderOutput,
         rawOutput: captured?.captured || '',
@@ -501,7 +572,13 @@ async function handleAgyStatus(requestId, args) {
   const health = await findSession(cwd);
   const ready = health !== null;
   const agyPid = (ready && Number.isInteger(health.agyPid) && health.agyPid > 0) ? health.agyPid : 0;
-  const agyReady = ready && agyPid > 0;
+  let agyReady = ready && agyPid > 0;
+  let observation = null;
+  if (agyReady) {
+    try { observation = await sessionController.read({ cwd }); }
+    catch (e) { observation = { state: 'capture_error', inputReady: false, action: e.message }; }
+    agyReady = observation.inputReady === true;
+  }
 
   let state = 'no_session';
   let reason = null;
@@ -510,11 +587,15 @@ async function handleAgyStatus(requestId, args) {
   if (!ready) {
     state = 'no_session';
     reason = `No active AGY session found for cwd '${cwd}'.`;
-    action = `Open a terminal in that directory, run 'agy', and keep the terminal open.`;
-  } else if (!agyReady) {
+    action = 'Call agy_open with this project directory to open a visible AGY window.';
+  } else if (!agyPid) {
     state = 'bridge_only';
     reason = `Bridge is connected (bridgePid: ${health.bridgePid}), but agy.exe is not active (agyPid: 0).`;
     action = `Run 'agy' in the project terminal. If authentication is needed, complete interactive OAuth/login in that terminal window. Wait for the AGY prompt, then re-check agy_status.`;
+  } else if (observation && !observation.inputReady) {
+    state = observation.state;
+    reason = 'The AGY window exists but is not ready for a new task.';
+    action = observation.action;
   } else {
     state = 'ready';
     reason = null;
@@ -532,6 +613,8 @@ async function handleAgyStatus(requestId, args) {
     pluginVersion: health?.pluginVersion ?? null,
     bridgePid: health?.bridgePid ?? null,
     agyPid,
+    inputReady: observation?.inputReady ?? false,
+    manualInputRequired: observation?.manualInputRequired ?? false,
     startedAt: health?.startedAt ?? null,
     reason,
     action
@@ -608,7 +691,7 @@ async function handleAgyRun(requestId, args) {
     const targetCwd = cwd ?? process.cwd();
     const msg = [
       `No active AGY session found for cwd '${targetCwd}'.`,
-      `Open a terminal in that directory and run 'agy' first, then retry.`
+      'Call agy_open with that project directory, inspect agy_read, then retry when inputReady is true.'
     ].join(' ');
     return rpcResult(requestId, textResult(msg, {
       status: 'no_session',
@@ -637,21 +720,46 @@ async function handleAgyRun(requestId, args) {
     ));
   }
 
+  if (args.autoApprove !== undefined && typeof args.autoApprove !== 'boolean') {
+    return rpcResult(requestId, textResult('autoApprove must be a boolean.', { status: 'invalid_input' }, true));
+  }
+  if (args.autoApprove === true && mode !== 'worker') {
+    return rpcResult(requestId, textResult('autoApprove is available only in worker mode.', { status: 'invalid_input' }, true));
+  }
+  if (editableFiles.some((file) => !path.isAbsolute(file) ||
+      path.relative(path.resolve(session.cwd), path.resolve(file)).startsWith('..') ||
+      path.isAbsolute(path.relative(path.resolve(session.cwd), path.resolve(file))))) {
+    return rpcResult(requestId, textResult('editableFiles must be absolute paths inside cwd.', { status: 'invalid_input' }, true));
+  }
   const agPrompt = buildAgyPrompt({ prompt, mode, editableFiles });
   const { timeoutSeconds, maxOutputChars } = limits;
 
   // ── Queue the request for this session ────────────────────────────────────
-  const result = await enqueueForSession(session.pipeName, () =>
-    visibleTerminalRequest({
+  const result = await enqueueForSession(session.pipeName, async () => {
+    if (pendingTasks.has(session.sessionId)) {
+      return { status: 'pending_task', submitted: false, error: 'A task is already pending in this terminal. Use agy_read or agy_wait; do not resend it.' };
+    }
+    const observation = await sessionController.read({ cwd: session.cwd });
+    if (!observation.inputReady) {
+      return { status: observation.state, submitted: false, output: observation.output, error: observation.action };
+    }
+    const token = randomUUID().replaceAll('-', '');
+    const ticket = { beginMarker: 'CODEX_AGY_RESULT_BEGIN_' + token, endMarker: 'CODEX_AGY_RESULT_END_' + token };
+    const pending = { ticket, sessionId: session.sessionId, agyPid: session.agyPid, cwd: session.cwd, editableFiles, autoApprove: args.autoApprove === true };
+    pendingTasks.set(session.sessionId, pending);
+    const captured = await visibleTerminalRequest({
       text: agPrompt,
       timeoutSeconds,
-      autoApprove: mode === 'worker',
+      autoApprove: pending.autoApprove,
       sessionId: session.sessionId,   // v0.4.1: passed directly, no process-name fallback
       agyPid: session.agyPid,         // v0.4.1: passed directly
       cwd: session.cwd,
-      editableFiles
-    })
-  );
+      editableFiles,
+      ticket
+    });
+    if (captured.status === 'completed_visible_terminal') pendingTasks.delete(session.sessionId);
+    return captured;
+  });
 
   const output = typeof result.output === 'string' ? result.output.trim() : '';
   const error = typeof result.error === 'string' ? result.error.trim() : '';
@@ -667,13 +775,15 @@ async function handleAgyRun(requestId, args) {
     `blocked: ${result.blocked ?? 0}`,
     result.status === 'completed_visible_terminal'
       ? 'Response captured from the visible AGY terminal.'
-      : 'Prompt submitted to the visible AGY terminal.',
+      : result.submitted === false ? 'No new input was sent to the terminal.' : 'Prompt submitted to the visible AGY terminal.',
     output ? `--- agy response ---\n${trimOutput(output, maxOutputChars)}` : '',
     error ? `--- capture error ---\n${trimOutput(error, maxOutputChars)}` : ''
   ].filter(Boolean).join('\n');
 
   return rpcResult(requestId, textResult(text, {
     status: result.status,
+    submitted: result.submitted ?? false,
+    manualInputRequired: ['awaiting_user', 'auth_required'].includes(result.status),
     exitCode: result.exitCode ?? null,
     sessionId: session.sessionId,
     cwd: session.cwd,
@@ -741,6 +851,54 @@ async function handleTerminalRun(requestId, args) {
   }, status !== 'completed'));
 }
 
+async function handleSessionControl(requestId, args, operation) {
+  try {
+    const observation = await sessionController[operation](args);
+    const structured = { ...observation, serverVersion: SERVER_VERSION };
+    const text = [
+      'state: ' + observation.state,
+      'cwd: ' + observation.cwd,
+      'inputReady: ' + Boolean(observation.inputReady),
+      'manualInputRequired: ' + Boolean(observation.manualInputRequired),
+      observation.action ? 'action: ' + observation.action : '',
+      observation.output ? '--- visible AGY screen ---\n' + observation.output : ''
+    ].filter(Boolean).join('\n');
+    return rpcResult(requestId, textResult(text, structured, ['capture_error', 'no_session'].includes(observation.status)));
+  } catch (e) {
+    return rpcResult(requestId, textResult(e.message, { status: 'terminal_error', serverVersion: SERVER_VERSION }, true));
+  }
+}
+
+async function handleAgyWait(requestId, args) {
+  try {
+    const limits = validateLimits(args);
+    const observation = await sessionController.read(args);
+    const pending = pendingTasks.get(observation.sessionId);
+    if (!pending) return rpcResult(requestId, textResult('No pending task for this session. Use agy_read to inspect the screen.', { status: 'no_pending_task' }, true));
+    if (observation.manualInputRequired || observation.status === 'capture_error') {
+      return rpcResult(requestId, textResult(observation.action, observation, true));
+    }
+    const session = await findSession(observation.cwd);
+    if (!session || session.sessionId !== pending.sessionId || session.agyPid !== pending.agyPid) {
+      return rpcResult(requestId, textResult('The original task session changed. Read the terminal before continuing.', { status: 'session_changed' }, true));
+    }
+    const result = await enqueueForSession(session.pipeName, () => visibleTerminalRequest({
+      ...pending, timeoutSeconds: limits.timeoutSeconds, observeOnly: true
+    }));
+    if (result.status === 'completed_visible_terminal') pendingTasks.delete(session.sessionId);
+    const structured = {
+      ...result, output: trimOutput(result.output ?? '', limits.maxOutputChars),
+      rawOutput: undefined, sessionId: session.sessionId, cwd: session.cwd, serverVersion: SERVER_VERSION,
+      manualInputRequired: ['awaiting_user', 'auth_required'].includes(result.status)
+    };
+    return rpcResult(requestId, textResult([
+      'status: ' + result.status, structured.output, result.error
+    ].filter(Boolean).join('\n'), structured, result.status !== 'completed_visible_terminal'));
+  } catch (e) {
+    return rpcResult(requestId, textResult(e.message, { status: 'terminal_error' }, true));
+  }
+}
+
 // ── Message dispatch ──────────────────────────────────────────────────────────
 
 async function callTool(requestId, params) {
@@ -748,6 +906,9 @@ async function callTool(requestId, params) {
   const name = params?.name;
 
   if (name === 'agy_status') return handleAgyStatus(requestId, args);
+  if (name === 'agy_open') return handleSessionControl(requestId, args, 'open');
+  if (name === 'agy_read') return handleSessionControl(requestId, args, 'read');
+  if (name === 'agy_wait') return handleAgyWait(requestId, args);
   if (name === 'agy_run') return handleAgyRun(requestId, args);
   if (name === 'terminal_run') return handleTerminalRun(requestId, args);
 
@@ -767,8 +928,10 @@ async function handleMessage(message) {
       serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
       instructions: [
         `agy-terminal v${SERVER_VERSION}.`,
-        'agy_run routes to the AGY terminal the user opened in the project cwd.',
-        'worker mode auto-approves ONLY file-edit confirmations within editableFiles and cwd.',
+        'Call agy_open to open or reuse a visible AGY terminal in the authorized project.',
+        'Call agy_read to see the same terminal the user sees without pressing any keys.',
+        'Leave manual confirmations and login to the user; use agy_wait after they handle a pending task prompt.',
+        'Confirmations are manual by default; autoApprove:true in worker mode permits only scoped file-edit confirmations.',
         'Shell commands, OAuth, login, delete, and out-of-scope paths are never auto-approved.',
         'target="auto" is not supported — omit target or the parameter entirely.',
         'Call agy_status to check session readiness before agy_run.',
@@ -781,12 +944,13 @@ async function handleMessage(message) {
   if (method === 'ping') { send(rpcResult(id, {})); return; }
 
   if (method === 'tools/list') {
-    send(rpcResult(id, { tools: [agyStatusTool, agyRunTool, terminalRunTool] }));
+    send(rpcResult(id, { tools: [agyOpenTool, agyReadTool, agyWaitTool, agyStatusTool, agyRunTool, terminalRunTool] }));
     return;
   }
 
   if (method === 'tools/call') {
-    send(await callTool(id, params));
+    try { send(await callTool(id, params)); }
+    catch (e) { send(rpcResult(id, textResult(e.message, { status: 'tool_error' }, true))); }
     return;
   }
 

@@ -1,7 +1,7 @@
 {
   "name": "agy-terminal",
-  "version": "0.4.1",
-  "description": "Expose a real agy/Gemini MCP tool connected to the user-opened visible terminal. Auto-approves only scoped file-edit confirmations; shell, OAuth, and out-of-scope files are never auto-approved.",
+  "version": "0.5.0",
+  "description": "Open and read a visible AGY/Gemini terminal shared with the user. Human confirmations are manual by default; resume observation after the user handles a prompt.",
   "author": {
     "name": "Martelost"
   },
@@ -17,8 +17,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "AGY Terminal",
-    "shortDescription": "Delegate bounded work to local AGY/Gemini (v0.4.1)",
-    "longDescription": "Routes agy_run calls to the AGY terminal the user opened in the project directory. Per-cwd session routing ensures Project A never receives Project B's tasks. Call agy_status first to verify both ready: true and a nonzero agyPid. agy_run accepts task, mode, cwd, editableFiles, and timeoutSeconds (target parameter must be omitted). File-edit confirmations within editableFiles are auto-approved; shell commands, OAuth, and out-of-scope writes are always blocked.",
+    "shortDescription": "Open and read a shared visible AGY terminal (v0.5.0)",
+    "longDescription": "agy_open opens or reuses a user-interactive console for the authorized project. agy_read reads its screen without typing. agy_run submits bounded review or worker tasks only at an idle prompt. The user handles confirmations and authentication; agy_wait resumes observing a pending task without resubmitting it. Scoped file-edit auto-approval requires explicit autoApprove:true in worker mode.",
     "developerName": "Martelost",
     "category": "Developer Tools",
     "capabilities": [
@@ -26,7 +26,9 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Check AGY session status with agy_status first (requires ready: true and nonzero agyPid).",
+      "Open or reuse a visible AGY console with agy_open({ cwd: '...' }).",
+      "Inspect the same terminal with agy_read; let the user handle any manual prompt or login.",
+      "Only submit a task when inputReady is true. Use agy_wait after the user handles a pending task confirmation.",
       "Use AGY for a read-only review: agy_run({ task: '...', mode: 'review', cwd: '...' }).",
       "Use AGY to implement a bounded change: agy_run({ task: '...', mode: 'worker', cwd: '...', editableFiles: [...], timeoutSeconds: 900 })."
     ]
