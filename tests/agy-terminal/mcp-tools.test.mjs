@@ -47,7 +47,7 @@ test('actual MCP advertises open/read/wait and leaves confirmations manual by de
   const rpc = client(temp);
   try {
     const init = await rpc.call('initialize');
-    assert.equal(init.result.serverInfo.version, '0.5.0');
+    assert.equal(init.result.serverInfo.version, '0.5.3');
     const listed = await rpc.call('tools/list');
     const tools = listed.result.tools;
     for (const name of ['agy_open', 'agy_read', 'agy_wait', 'agy_status', 'agy_run', 'terminal_run']) {

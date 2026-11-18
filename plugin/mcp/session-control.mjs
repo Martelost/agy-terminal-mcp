@@ -22,13 +22,17 @@ export function classifyScreen(value) {
     return { state: 'busy', inputReady: false, manualInputRequired: false, output, action: 'Wait for the current operation to finish.' };
   }
   const prompts = [...tail.matchAll(/^[ \t]*[>›❯][ \t]*([^\r\n]*)$/gm)];
-  if (prompts.length && prompts.at(-1)[1].trim()) {
+  const promptText = prompts.at(-1)?.[1].trim() ?? '';
+  // AGY can render an idle mode hint on the prompt line. Auto, plan, and
+  // accept-edits hints are UI text, not a human draft.
+  const modeHint = /^(?:auto|plan|accept[- ]edits)(?: mode)?(?::.*)?\s+\(shift\+tab to cycle\)$/i.test(promptText);
+  if (promptText && !modeHint) {
     return {
       state: 'user_typing', inputReady: false, manualInputRequired: false, output,
       action: 'The terminal contains an unsent draft. Let the user finish before submitting a task.'
     };
   }
-  const inputReady = /\?\s+for shortcuts|type (?:your |a )?message|^\s*[>›❯]\s*$/im.test(tail);
+  const inputReady = modeHint || /\?\s+for shortcuts|type (?:your |a )?message|^\s*[>›❯]\s*$/im.test(tail);
   return {
     state: inputReady ? 'ready' : 'starting', inputReady, manualInputRequired: false, output,
     action: inputReady ? null : 'Read the terminal again after startup completes.'

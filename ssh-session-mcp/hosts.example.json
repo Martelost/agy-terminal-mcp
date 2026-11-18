@@ -1,0 +1,20 @@
+{
+  "hosts": [
+    {
+      "name": "linux-box",
+      "hostname": "linux-box.example",
+      "username": "your-user",
+      "shell": "posix",
+      "identityFile": "C:/Users/your-user/.ssh/id_ed25519",
+      "port": 22
+    },
+    {
+      "name": "windows-box",
+      "hostname": "windows-box.example",
+      "username": "your-user",
+      "shell": "powershell",
+      "identityFile": "C:/Users/your-user/.ssh/id_ed25519",
+      "port": 22
+    }
+  ]
+}

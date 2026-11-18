@@ -6,6 +6,7 @@ $nodeDirectory = Split-Path -Parent (Get-Command node.exe -CommandType Applicati
 $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('agy-launcher-tests-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
 . (Join-Path $repoRoot 'tools\agy-launcher-common.ps1')
+. (Join-Path $repoRoot 'tools\agy-codex-registration.ps1')
 $script:passed = 0
 $script:failed = 0
 $script:commandCandidates = @()
@@ -66,13 +67,14 @@ function Get-FixtureSnapshot {
     } | Sort-Object) -join '|')
 }
 function Invoke-IsolatedInstaller {
-    param([string]$Profile, [switch]$Check, [switch]$RepairLauncher)
+    param([string]$Profile, [switch]$Check, [switch]$RepairLauncher, [switch]$NoCodexRegistration)
     $installer = Join-Path $repoRoot 'tools\agy-terminal-install.ps1'
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $powershellPath
     $startInfo.Arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $installer + '"'
     if ($Check) { $startInfo.Arguments += ' -Check' }
     if ($RepairLauncher) { $startInfo.Arguments += ' -RepairLauncher' }
+    if ($NoCodexRegistration) { $startInfo.Arguments += ' -NoCodexRegistration' }
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
@@ -122,7 +124,7 @@ try {
         Assert-Equal (Get-AgyBridgeLauncher -UserProfile $profile) $legacy
     }
     Test-Case 'Bridge discovery chooses the newest complete installation across namespaces' {
-        $newest = New-FixtureFile 'profile\.codex\plugins\cache\agy-terminal-mcp\agy-terminal\0.5.0\mcp\agy-terminal-bridge.ps1'
+        $newest = New-FixtureFile 'profile\.codex\plugins\cache\agy-terminal-mcp\agy-terminal\0.5.1\mcp\agy-terminal-bridge.ps1'
         [void](New-FixtureFile 'profile\.codex\plugins\cache\banklist-local\agy-terminal\0.6.0\incomplete.txt')
         [void](New-FixtureFile 'profile\.codex\plugins\cache\agy-terminal-mcp\agy-terminal\latest\mcp\agy-terminal-bridge.ps1')
         Assert-Equal (Get-AgyBridgeLauncher -UserProfile $profile) $newest
@@ -168,16 +170,94 @@ try {
     $installProfile = Join-Path $fixtureRoot 'installed profile'
     [void](New-FixtureFile 'installed profile\local\agy\bin\agy.exe')
     New-Item -ItemType Directory -Path (Join-Path $installProfile '.codex\skills') -Force | Out-Null
+    $originalConfiguration = @'
+# Unrelated preferences must remain byte-for-byte intact.
+[features]
+sample_flag = true
+
+[plugins."agy-terminal@banklist-local"]
+enabled = true # legacy AGY
+local_note = "preserve this"
+
+[plugins."other@banklist-local"]
+enabled = true
+
+[projects.'C:\Another [project]']
+trust_level = "trusted"
+'@
+    $configPath = New-FixtureFile 'installed profile\.codex\config.toml' $originalConfiguration
+    $standaloneMarketplace = Join-Path $installProfile '.codex\plugins\local-marketplaces\agy-terminal-mcp'
     Test-Case 'Installer copies hidden plugin metadata and all launcher dependencies' {
         $result = Invoke-IsolatedInstaller -Profile $installProfile
         if ($result.ExitCode -ne 0) { throw $result.Output }
         foreach ($file in @(
             '.codex\bin\agy.cmd', '.codex\bin\agy-auto.ps1', '.codex\bin\agy-launcher-common.ps1',
-            '.codex\plugins\cache\agy-terminal-mcp\agy-terminal\0.5.0\.mcp.json',
-            '.codex\plugins\cache\agy-terminal-mcp\agy-terminal\0.5.0\.codex-plugin\plugin.json'
+            '.codex\plugins\cache\agy-terminal-mcp\agy-terminal\0.5.1\.mcp.json',
+            '.codex\plugins\cache\agy-terminal-mcp\agy-terminal\0.5.1\.codex-plugin\plugin.json',
+            '.codex\plugins\local-marketplaces\agy-terminal-mcp\.agents\plugins\marketplace.json',
+            '.codex\plugins\local-marketplaces\agy-terminal-mcp\plugin\.codex-plugin\plugin.json'
         )) {
             Assert-Equal (Test-Path -LiteralPath (Join-Path $installProfile $file) -PathType Leaf) $true
         }
+    }
+    Test-Case 'Standalone registration disables only duplicate AGY and preserves unrelated configuration' {
+        $registration = Get-AgyCodexRegistration -ConfigPath $configPath -MarketplacePath $standaloneMarketplace
+        Assert-Equal $registration.Ready $true
+        Assert-Equal $registration.LegacyCount 0
+        $config = [System.IO.File]::ReadAllText($configPath)
+        Assert-Equal ($config.Contains('enabled = false # legacy AGY')) $true
+        foreach ($preserved in @('sample_flag = true', 'local_note = "preserve this"', '[plugins."other@banklist-local"]', '[projects.''C:\Another [project]'']', 'trust_level = "trusted"')) {
+            Assert-Equal ($config.Contains($preserved)) $true
+        }
+        $other = @(Get-AgyConfigSections $config | Where-Object { $_.Name -eq 'plugins."other@banklist-local"' })
+        Assert-Equal ($other[0].Body -match 'enabled = true') $true
+    }
+    Test-Case 'Registration backs up the original configuration before changing it' {
+        $backups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $configPath) -Filter 'config.toml.agy-backup.*')
+        Assert-Equal $backups.Count 1
+        Assert-Equal ([System.IO.File]::ReadAllText($backups[0].FullName)) $originalConfiguration
+    }
+    Test-Case 'Reinstall is idempotent and creates no extra configuration backups' {
+        $before = Get-FixtureSnapshot $installProfile
+        $result = Invoke-IsolatedInstaller -Profile $installProfile
+        if ($result.ExitCode -ne 0) { throw $result.Output }
+        Assert-Equal (Get-FixtureSnapshot $installProfile) $before
+    }
+    Test-Case 'Doctor detects stale active registration even when a newer cache exists' {
+        $registered = [System.IO.File]::ReadAllText($configPath)
+        try {
+            [System.IO.File]::WriteAllText($configPath, $originalConfiguration)
+            $before = Get-FixtureSnapshot $installProfile
+            $result = Invoke-IsolatedInstaller -Profile $installProfile -Check
+            Assert-Equal $result.ExitCode 1
+            Assert-Equal ($result.Output -match 'newer cache alone does not update') $true
+            Assert-Equal (Get-FixtureSnapshot $installProfile) $before
+        } finally { [System.IO.File]::WriteAllText($configPath, $registered) }
+    }
+    Test-Case 'Duplicate AGY configuration tables fail without modifying the file' {
+        $duplicatePath = New-FixtureFile 'duplicate config\config.toml' ($originalConfiguration + "`n[plugins.`"agy-terminal@banklist-local`"]`nenabled = true`n")
+        $before = [System.IO.File]::ReadAllText($duplicatePath)
+        $rejected = $false
+        try { Register-AgyCodexPlugin -ConfigPath $duplicatePath -MarketplacePath $standaloneMarketplace } catch { $rejected = $true }
+        Assert-Equal $rejected $true
+        Assert-Equal ([System.IO.File]::ReadAllText($duplicatePath)) $before
+    }
+    Test-Case 'Multiline TOML is not rewritten using ambiguous table-like content' {
+        $multilinePath = New-FixtureFile 'multiline config\config.toml' 'example = """ [plugins."agy-terminal@other"] """'
+        $before = [System.IO.File]::ReadAllText($multilinePath)
+        $rejected = $false
+        try { Register-AgyCodexPlugin -ConfigPath $multilinePath -MarketplacePath $standaloneMarketplace } catch { $rejected = $true }
+        Assert-Equal $rejected $true
+        Assert-Equal ([System.IO.File]::ReadAllText($multilinePath)) $before
+    }
+    Test-Case 'Non-Codex installation opt-out does not create Codex configuration' {
+        $otherProfile = Join-Path $fixtureRoot 'other MCP client'
+        [void](New-FixtureFile 'other MCP client\local\agy\bin\agy.exe')
+        New-Item -ItemType Directory -Path (Join-Path $otherProfile '.codex\skills') -Force | Out-Null
+        $result = Invoke-IsolatedInstaller -Profile $otherProfile -NoCodexRegistration
+        if ($result.ExitCode -ne 0) { throw $result.Output }
+        Assert-Equal (Test-Path -LiteralPath (Join-Path $otherProfile '.codex\config.toml')) $false
+        Assert-Equal (Test-Path -LiteralPath (Join-Path $otherProfile '.codex\plugins\local-marketplaces')) $false
     }
     Test-Case 'Doctor succeeds on a complete installation without changing any files' {
         $before = Get-FixtureSnapshot $installProfile

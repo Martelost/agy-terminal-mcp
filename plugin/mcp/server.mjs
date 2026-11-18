@@ -1,5 +1,5 @@
 /**
- * agy-terminal MCP server  —  v0.5.0
+ * agy-terminal MCP server  —  v0.5.3
  *
  * Protocol: JSON-RPC 2.0 over stdio (MCP 2025-06-18)
  *
@@ -29,7 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { createSessionController } from './session-control.mjs';
 
 const SERVER_NAME = 'agy-terminal';
-const SERVER_VERSION = '0.5.0';
+const SERVER_VERSION = '0.5.3';
 const PROTOCOL_VERSION = '2025-06-18';
 const DEFAULT_TIMEOUT_SECONDS = 900;
 const DEFAULT_MAX_OUTPUT_CHARS = 30000;
@@ -47,7 +47,8 @@ const agyStatusTool = {
   description: [
     'Report whether an AGY terminal session is ready for the given cwd.',
     'Returns: ready flag, agyReady flag, cwd, sessionId, serverVersion, pipeName, bridgePid, agyPid, state, and actionable reason if unavailable.',
-    'Always call this before agy_run to verify that agyReady is true and agyPid is non-zero.'
+    'Always call this before agy_run to verify that agyReady is true and agyPid is non-zero.',
+    'If no session exists, use agy_open. Do not substitute a headless backend.'
   ].join(' '),
   inputSchema: {
     type: 'object',
@@ -164,7 +165,7 @@ const terminalRunTool = {
 
 const agyOpenTool = {
   name: 'agy_open',
-  description: 'Open AGY yourself in a visible, user-interactive console for the authorized project. Reuse an existing session. Return the actual terminal screen and whether the user must handle a prompt. Never confirms prompts or logs in.',
+  description: 'Open AGY yourself in a visible, user-interactive console for any authorized project. Reuse an existing session. Return the actual terminal screen and whether the user must handle a prompt. Opening failures are not permission to switch to headless execution. Never confirms prompts or logs in.',
   inputSchema: {
     type: 'object', additionalProperties: false,
     properties: {

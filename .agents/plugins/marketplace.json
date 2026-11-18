@@ -1,0 +1,12 @@
+{
+  "name": "agy-terminal-mcp",
+  "interface": { "displayName": "AGY Terminal MCP" },
+  "plugins": [
+    {
+      "name": "agy-terminal",
+      "source": { "source": "local", "path": "./plugin" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}

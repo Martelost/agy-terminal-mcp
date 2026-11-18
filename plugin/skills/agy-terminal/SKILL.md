@@ -1,18 +1,35 @@
 ---
 name: agy-terminal
 description: >
-  Open and read a visible AGY/Gemini terminal shared with the user.
-  Delegate bounded tasks and resume observation after the user handles prompts.
-  Human confirmations are manual by default.
+  Open and operate AGY/Gemini in a visible, interactive terminal shared with the user.
+  Use when asked to open AGY or delegate review or implementation to AGY in any project.
+  Do not substitute a headless backend unless the user explicitly requests headless mode.
 metadata:
-  short-description: Shared visible AGY terminal (v0.5.0)
+  short-description: Shared visible AGY terminal (v0.5.3)
 ---
 
-# AGY Terminal (v0.5.0)
+# AGY Terminal (v0.5.3)
 
-Use this skill for authorized AGY/Gemini review or bounded implementation in the
-current project. Codex can open the console itself; the user can see and type in
-the same console.
+This skill applies in any authorized project, not a particular repository or
+marketplace. Use the absolute directory supplied by the user or the current
+workspace. Ask only when the target project is unclear.
+
+AGY in this workflow means a visible, interactive console shared with the user.
+Codex opens it and sends ordinary task input itself; the user can see and type in
+the same console. If the user explicitly requests headless mode, use the appropriate
+headless workflow instead; do not pretend it is this shared terminal.
+
+## Capability check and fallback
+
+- Require agy_open and agy_read before starting this workflow. If they are missing,
+  the client has an old or incomplete plugin: report that and request a reload or
+  installation update. Do not silently call agy_ask, a headless MCP server,
+  non-interactive CLI flags, or redirect AGY's stdin/stdout as a substitute.
+- A no_session result means open the shared console with agy_open, not switch
+  backends. If opening or capture fails, report the error and stop the AGY handoff.
+- agy_open must produce or reuse a visible console, and agy_read must return actual
+  screen text from the same sessionId and agyPid. A hidden bridge or a live PID alone
+  is not proof of a usable shared terminal.
 
 ## Workflow
 
@@ -79,8 +96,9 @@ await agy_wait({ cwd: "C:\\Users\\me\\project" });
 
 Restart Codex once after an MCP update so the new tool definitions are loaded.
 agy_open requires the installer-provided launcher in .codex\bin. The installer
-supports both current and legacy plugin caches and can diagnose conflicting
-unsigned launcher shims.
+registers a standalone, user-level marketplace so every chat uses the same plugin
+without relying on a project checkout. Reinstall when the loaded tools still lack
+agy_open or agy_read; restarting alone cannot upgrade an outdated plugin source.
 
 No session: use agy_open for the correct project. Capture failure: keep the
 visible window open, inspect the reported error, and do not submit a task until

@@ -21,7 +21,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
-$PLUGIN_VERSION   = '0.5.0'
+$PLUGIN_VERSION   = '0.5.3'
 $SESSION_REGISTRY = Join-Path $env:TEMP 'codex-agy-sessions.json'
 $REGISTRY_LOCK    = Join-Path $env:TEMP 'codex-agy-sessions.lock'
 

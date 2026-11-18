@@ -113,3 +113,21 @@ test('an unsent human draft is not treated as an idle input prompt', () => {
   assert.equal(result.state, 'user_typing');
   assert.equal(result.inputReady, false);
 });
+
+test('all idle composer modes are ready while unsubmitted mode-like text remains a draft', () => {
+  const idleScreens = [
+    '> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n? for shortcuts',
+    '> Plan mode: planning only (shift+tab to cycle)\n? for shortcuts',
+    '> Accept edits mode: edits auto-approved (shift+tab to cycle)\n? for shortcuts',
+    '> \n? for shortcuts'
+  ];
+  for (const screen of idleScreens) {
+    const result = classifyScreen(screen);
+    assert.equal(result.state, 'ready', screen);
+    assert.equal(result.inputReady, true, screen);
+  }
+
+  const draft = classifyScreen('> Plan mode\n? for shortcuts');
+  assert.equal(draft.state, 'user_typing');
+  assert.equal(draft.inputReady, false);
+});

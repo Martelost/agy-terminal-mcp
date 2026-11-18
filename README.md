@@ -24,11 +24,18 @@ From the repository root, run:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tools\agy-terminal-install.ps1
 ```
 
-Restart the MCP client after installation so it reloads the server. The installer copies the plugin to the user-level Codex plugin cache and installs the `agy` launcher wrapper in `%USERPROFILE%\.codex\bin`.
+Restart Codex after installation so every chat loads the same server and skill.
+The installer registers a standalone, user-level `agy-terminal-mcp` marketplace
+under `%USERPROFILE%\.codex\plugins\local-marketplaces`, copies the versioned cache,
+and installs the `agy` wrapper in `%USERPROFILE%\.codex\bin`. It backs up Codex
+configuration before disabling duplicate AGY Terminal registrations. Other plugins
+and project settings are preserved; no Banklist or project checkout is required.
+For another MCP client, use `-NoCodexRegistration` to install files without changing
+Codex settings, then configure that client using `plugin/.mcp.json`.
 
 ## Use
 
-Ask Codex to open AGY for your project. Version 0.5.0 provides:
+Ask Codex to open AGY for your project. Version 0.5.3 provides:
 
 | Tool | Behavior |
 |------|----------|
@@ -41,6 +48,10 @@ When the window needs a confirmation, Codex reports manualInputRequired. Handle
 the prompt yourself in that window. Authentication screens are hidden from the
 model. Codex then reads again, or waits for the pending task, without submitting
 the task twice.
+
+Every invocation of this skill uses the shared visible console. A missing session
+means use agy_open, not a headless backend. If a chat lacks agy_open or agy_read,
+update the plugin and reload Codex; restarting an old plugin alone is not enough.
 
 You can test opening and reading directly from the repository:
 
@@ -76,6 +87,10 @@ continue only when inputReady is true and agyPid is nonzero for this project.
 Use `agy_run` with an explicit task, mode, project directory, and `editableFiles` list. Keep the file scope as small as possible. The terminal remains visible so the user can review the worker's activity.
 
 ## Project layout
+
+The separate [SSH Sessions MCP](ssh-session-mcp/README.md) keeps reusable SSH
+shells for configured hosts. It is installed independently with
+`ssh-session-mcp/install.ps1`.
 
 ```text
 plugin/                         MCP plugin source

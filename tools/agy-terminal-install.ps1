@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# agy-terminal-install.ps1 -- AGY Terminal plugin installer & doctor  (v0.4.1)
+# agy-terminal-install.ps1 -- AGY Terminal plugin installer & doctor (v0.5.3)
 #
 # Usage:
 #   .\tools\agy-terminal-install.ps1          # Install plugin globally
@@ -11,7 +11,9 @@ param(
     # When set, only check the installation state without changing anything.
     [switch]$Check,
     # Explicitly back up the unsigned .codex\bin\agy.exe that shadows agy.cmd.
-    [switch]$RepairLauncher
+    [switch]$RepairLauncher,
+    # Other MCP clients may install files without changing Codex registration.
+    [switch]$NoCodexRegistration
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,14 +21,19 @@ if ($Check -and $RepairLauncher) {
     throw '-Check is read-only and cannot be combined with -RepairLauncher.'
 }
 . (Join-Path $PSScriptRoot 'agy-launcher-common.ps1')
+. (Join-Path $PSScriptRoot 'agy-codex-registration.ps1')
 
-$PLUGIN_VERSION   = '0.5.0'
+$PLUGIN_VERSION   = '0.5.3'
 $PLUGIN_NAME      = 'agy-terminal'
 $PLUGIN_NAMESPACE = 'agy-terminal-mcp'
 $SCRIPT_DIR       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $REPO_ROOT        = Split-Path -Parent $SCRIPT_DIR
 $PLUGIN_SOURCE    = Join-Path $REPO_ROOT 'plugin'
 $PLUGIN_CACHE_DIR = Join-Path $env:USERPROFILE ".codex\plugins\cache\$PLUGIN_NAMESPACE\$PLUGIN_NAME\$PLUGIN_VERSION"
+$MARKETPLACE_DIR = Join-Path $env:USERPROFILE ".codex\plugins\local-marketplaces\$PLUGIN_NAMESPACE"
+$MARKETPLACE_PLUGIN_DIR = Join-Path $MARKETPLACE_DIR 'plugin'
+$MARKETPLACE_SOURCE_FILE = Join-Path $REPO_ROOT '.agents\plugins\marketplace.json'
+$CODEX_CONFIG_FILE = Join-Path $env:USERPROFILE '.codex\config.toml'
 $AGY_BIN_DIR      = Join-Path $env:USERPROFILE '.codex\bin'
 $LAUNCHER_SOURCE  = Join-Path $SCRIPT_DIR 'agy-auto.ps1'
 $LAUNCHER_TARGET  = Join-Path $AGY_BIN_DIR 'agy-auto.ps1'
@@ -263,6 +270,26 @@ if (Test-Path -LiteralPath $SESSION_REGISTRY -PathType Leaf) {
     Write-INFO 'No session registry -- no AGY terminals have been opened yet.'
 }
 
+# -- Check 8: Actual user-level plugin registration -----------------------------
+
+if (-not $NoCodexRegistration) {
+    Write-Host ''
+    Write-Host '8. User-level Codex plugin registration'
+    $registration = Get-AgyCodexRegistration -ConfigPath $CODEX_CONFIG_FILE -MarketplacePath $MARKETPLACE_DIR
+    $registeredManifestPath = Join-Path $MARKETPLACE_PLUGIN_DIR '.codex-plugin\plugin.json'
+    $registeredVersion = if (Test-Path -LiteralPath $registeredManifestPath) {
+        try { (Get-Content -Raw -LiteralPath $registeredManifestPath | ConvertFrom-Json).version } catch { $null }
+    } else { $null }
+    if ($registration.Ready -and $registeredVersion -eq $PLUGIN_VERSION) {
+        Write-OK "agy-terminal@$PLUGIN_NAMESPACE uses the standalone v$PLUGIN_VERSION source."
+    } elseif ($Check) {
+        Write-WARN 'Codex is not registered to the current standalone AGY plugin. A newer cache alone does not update the plugin loaded by chats.'
+        Write-INFO 'Run the installer, then restart Codex to load agy_open and agy_read.'
+    } else {
+        Write-INFO 'Will register the standalone AGY source for all chats and disable duplicate AGY Terminal registrations.'
+    }
+}
+
 # -- Install -------------------------------------------------------------------
 
 if (-not $Check) {
@@ -280,6 +307,10 @@ if (-not $Check) {
             Write-FAIL "Cannot install: launcher source not found at '$source'."
             exit 1
         }
+    }
+    if (-not $NoCodexRegistration -and -not (Test-Path -LiteralPath $MARKETPLACE_SOURCE_FILE -PathType Leaf)) {
+        Write-FAIL 'Cannot register the plugin: standalone marketplace metadata is missing.'
+        exit 1
     }
     if ($RepairLauncher) {
         if (-not $agyPath) {
@@ -303,24 +334,37 @@ if (-not $Check) {
         Write-INFO "Created '$PLUGIN_CACHE_DIR'"
     }
 
-    # Copy files (overwrite)
+    # Install a stable source outside project directories, plus the version cache.
+    $pluginDestinations = @($PLUGIN_CACHE_DIR)
+    if (-not $NoCodexRegistration) { $pluginDestinations += $MARKETPLACE_PLUGIN_DIR }
     $items = Get-ChildItem -LiteralPath $PLUGIN_SOURCE -Recurse -Force
-    foreach ($item in $items) {
-        $relative  = $item.FullName.Substring($PLUGIN_SOURCE.Length).TrimStart('\','/')
-        $dest      = Join-Path $PLUGIN_CACHE_DIR $relative
-        if ($item.PSIsContainer) {
-            if (-not (Test-Path -LiteralPath $dest -PathType Container)) {
-                New-Item -ItemType Directory -Path $dest -Force | Out-Null
+    foreach ($pluginDestination in $pluginDestinations) {
+        foreach ($item in $items) {
+            $relative  = $item.FullName.Substring($PLUGIN_SOURCE.Length).TrimStart('\','/')
+            $dest      = Join-Path $pluginDestination $relative
+            if ($item.PSIsContainer) {
+                if (-not (Test-Path -LiteralPath $dest -PathType Container)) {
+                    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+                }
+            } else {
+                $destDir = Split-Path -Parent $dest
+                if (-not (Test-Path -LiteralPath $destDir -PathType Container)) {
+                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                }
+                Copy-Item -LiteralPath $item.FullName -Destination $dest -Force
             }
-        } else {
-            $destDir = Split-Path -Parent $dest
-            if (-not (Test-Path -LiteralPath $destDir -PathType Container)) {
-                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-            }
-            Copy-Item -LiteralPath $item.FullName -Destination $dest -Force
         }
     }
     Write-OK "Plugin v$PLUGIN_VERSION installed to '$PLUGIN_CACHE_DIR'"
+
+    if (-not $NoCodexRegistration) {
+        $metadataDirectory = Join-Path $MARKETPLACE_DIR '.agents\plugins'
+        New-Item -ItemType Directory -Path $metadataDirectory -Force | Out-Null
+        Copy-Item -LiteralPath $MARKETPLACE_SOURCE_FILE -Destination (Join-Path $metadataDirectory 'marketplace.json') -Force
+        $registrationBackup = Register-AgyCodexPlugin -ConfigPath $CODEX_CONFIG_FILE -MarketplacePath $MARKETPLACE_DIR
+        if ($registrationBackup) { Write-INFO "Previous Codex configuration backed up at '$registrationBackup'." }
+        Write-OK "Registered agy-terminal@$PLUGIN_NAMESPACE for all projects and chats."
+    }
 
     if (Test-Path -LiteralPath $LAUNCHER_SOURCE -PathType Leaf) {
         if (-not (Test-Path -LiteralPath $AGY_BIN_DIR -PathType Container)) {
