@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-tests:
+    name: Windows Tests
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Install SSH MCP dependencies
+        run: npm ci --ignore-scripts
+        working-directory: ssh-session-mcp
+
+      - name: Run Node tests
+        run: |
+          node tests/agy-terminal/prompt-parser.test.mjs
+          node tests/agy-terminal/pipe-integration.test.mjs
+          node --test tests/agy-terminal/session-control.test.mjs tests/agy-terminal/mcp-tools.test.mjs
+
+      - name: Run PowerShell tests
+        run: |
+          powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\agy-terminal\launcher.test.ps1
+          powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\agy-terminal\manual-input.test.ps1
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check plugin/mcp/server.mjs
+          node --check ssh-session-mcp/src/server.mjs

@@ -187,13 +187,14 @@ trust_level = "trusted"
 '@
     $configPath = New-FixtureFile 'installed profile\.codex\config.toml' $originalConfiguration
     $standaloneMarketplace = Join-Path $installProfile '.codex\plugins\local-marketplaces\agy-terminal-mcp'
+    $installedVersion = (Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'plugin\.codex-plugin\plugin.json') | ConvertFrom-Json).version
     Test-Case 'Installer copies hidden plugin metadata and all launcher dependencies' {
         $result = Invoke-IsolatedInstaller -Profile $installProfile
         if ($result.ExitCode -ne 0) { throw $result.Output }
         foreach ($file in @(
             '.codex\bin\agy.cmd', '.codex\bin\agy-auto.ps1', '.codex\bin\agy-launcher-common.ps1',
-            '.codex\plugins\cache\agy-terminal-mcp\agy-terminal\0.5.1\.mcp.json',
-            '.codex\plugins\cache\agy-terminal-mcp\agy-terminal\0.5.1\.codex-plugin\plugin.json',
+            ".codex\plugins\cache\agy-terminal-mcp\agy-terminal\$installedVersion\.mcp.json",
+            ".codex\plugins\cache\agy-terminal-mcp\agy-terminal\$installedVersion\.codex-plugin\plugin.json",
             '.codex\plugins\local-marketplaces\agy-terminal-mcp\.agents\plugins\marketplace.json',
             '.codex\plugins\local-marketplaces\agy-terminal-mcp\plugin\.codex-plugin\plugin.json'
         )) {
