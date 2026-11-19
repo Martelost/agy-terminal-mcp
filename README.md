@@ -117,7 +117,7 @@ node --check plugin/mcp/server.mjs
 
 ## GitHub security automation
 
-The public repository uses GitHub's free security features: secret scanning and push protection are enabled, CodeQL runs on pushes and pull requests through `.github/workflows/codeql.yml`, and Dependabot checks the GitHub Actions used by the workflow.
+The public repository uses GitHub's free security features: secret scanning and push protection are enabled, CodeQL runs on pushes and pull requests through `.github/workflows/codeql.yml`, and Dependabot checks GitHub Actions and the SSH MCP's npm dependencies weekly.
 
 PowerShell syntax can be checked without changing execution policy permanently:
 
