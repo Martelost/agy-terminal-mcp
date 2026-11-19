@@ -31,8 +31,7 @@ test('Enter, trust, yes/no and survey prompts are owned by the user', () => {
 test('login screens never return visible codes or authentication URLs', () => {
   const result = classifyScreen('Login with Google\nhttps://accounts.google.com/oauth\nverification code: SECRET123');
   assert.equal(result.state, 'auth_required');
-  assert.equal(result.output.includes('SECRET123'), false);
-  assert.equal(result.output.includes('accounts.google.com'), false);
+  assert.equal(result.output, '[Authentication screen hidden. Complete login yourself in the visible AGY window.]');
   assert.equal(result.manualInputRequired, true);
   assert.notEqual(classifyScreen('Review the login implementation\n? for shortcuts').state, 'auth_required');
   assert.equal(classifyScreen('You are currently not signed in.\nSigning in...' + ('\n' + ' '.repeat(120)).repeat(30)).state, 'auth_required');
